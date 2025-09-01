@@ -1,9 +1,4 @@
-using FluentValidation;
-using TranslationAPI.BusinessRules.Abstracts;
-using TranslationAPI.BusinessRules.Concretes;
-using TranslationAPI.Handlers;
-using TranslationAPI.Services.Abstracts;
-using TranslationAPI.Services.Concretes;
+using TranslationAPI.Extensions;
 
 var builder = WebApplication.CreateBuilder(args);
 
@@ -16,13 +11,8 @@ builder.Services.AddHttpClient();
 
 builder.Services.AddMemoryCache();
 
-builder.Services.AddScoped<ITranslationService, TranslationService>();
+builder.Services.AddDependenciesExtension();
 
-builder.Services.AddScoped<ITranslationBusinessRules, TranslationBusinessRules>();
-
-builder.Services.AddValidatorsFromAssemblyContaining<Program>();
-
-builder.Services.AddExceptionHandler<GlobalExceptionHandler>();
 builder.Services.AddProblemDetails();
 
 builder.Services.AddCors(options =>
