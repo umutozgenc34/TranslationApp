@@ -1,7 +1,9 @@
 ﻿using Microsoft.AspNetCore.Mvc;
+using Microsoft.Extensions.Options;
 using TranslationAPI.Exceptions;
 using TranslationAPI.Models.Requests;
 using TranslationAPI.Models.Responses;
+using TranslationAPI.Options;
 using TranslationAPI.Services.Abstracts;
 
 namespace TranslationAPI.Controllers;
@@ -12,11 +14,16 @@ public class TranslationController : ControllerBase
 {
     private readonly ITranslationService _translationService;
     private readonly ILogger<TranslationController> _logger;
+    private readonly GoogleTranslateOptions _options;
 
-    public TranslationController(ITranslationService translationService, ILogger<TranslationController> logger)
+    public TranslationController(
+        ITranslationService translationService,
+        ILogger<TranslationController> logger,
+        IOptions<GoogleTranslateOptions> options)
     {
         _translationService = translationService;
         _logger = logger;
+        _options = options.Value;
     }
 
     [HttpPost("translate")]
@@ -35,8 +42,8 @@ public class TranslationController : ControllerBase
     [ProducesResponseType(typeof(List<TranslationResponse>), 200)]
     public async Task<IActionResult> TranslateBatch([FromBody] List<TranslationRequest> requests)
     {
-        if (requests?.Count > 10)
-            throw new BusinessException("Maksimum 10 metin aynı anda çevrilebilir.");
+        if (requests?.Count > _options.MaxBatchSize)
+            throw new BusinessException($"Maksimum {_options.MaxBatchSize} metin aynı anda çevrilebilir.");
 
         var tasks = requests!.Select(req => _translationService.TranslateAsync(req));
         var results = await Task.WhenAll(tasks);

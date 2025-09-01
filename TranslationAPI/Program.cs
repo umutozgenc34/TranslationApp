@@ -1,4 +1,5 @@
 using TranslationAPI.Extensions;
+using TranslationAPI.Options;
 
 var builder = WebApplication.CreateBuilder(args);
 
@@ -12,6 +13,9 @@ builder.Services.AddHttpClient();
 builder.Services.AddMemoryCache();
 
 builder.Services.AddDependenciesExtension();
+
+builder.Services.Configure<GoogleTranslateOptions>(
+    builder.Configuration.GetSection("GoogleTranslate"));
 
 builder.Services.AddProblemDetails();
 

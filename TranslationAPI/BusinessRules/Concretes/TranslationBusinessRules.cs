@@ -1,21 +1,24 @@
 ﻿using Microsoft.Extensions.Caching.Memory;
+using Microsoft.Extensions.Options;
+using System.Security.Cryptography;
 using System.Text;
 using TranslationAPI.BusinessRules.Abstracts;
 using TranslationAPI.Exceptions;
 using TranslationAPI.Models.External;
 using TranslationAPI.Models.Requests;
 using TranslationAPI.Models.Responses;
+using TranslationAPI.Options;
 
 namespace TranslationAPI.BusinessRules.Concretes;
 
 public class TranslationBusinessRules : ITranslationBusinessRules
 {
-    private readonly IConfiguration _configuration;
+    private readonly GoogleTranslateOptions _googleOptions;
     private readonly Dictionary<string, string> _supportedLanguages;
 
-    public TranslationBusinessRules(IConfiguration configuration)
+    public TranslationBusinessRules(IOptions<GoogleTranslateOptions> googleOptions)
     {
-        _configuration = configuration;
+        _googleOptions = googleOptions.Value;
         _supportedLanguages = new()
         {
             { "auto", "Otomatik Algıla" },
@@ -33,8 +36,8 @@ public class TranslationBusinessRules : ITranslationBusinessRules
         if (string.IsNullOrWhiteSpace(request.Text))
             throw new BusinessException("Çevrilecek metin boş olamaz.");
 
-        if (request.Text.Length > 5000)
-            throw new BusinessException("Metin 5000 karakterden uzun olamaz.");
+        if (request.Text.Length > _googleOptions.MaxTextLength)
+            throw new BusinessException($"Metin {_googleOptions.MaxTextLength} karakterden uzun olamaz.");
 
         if (!_supportedLanguages.ContainsKey(request.FromLanguage.ToLower()))
             throw new BusinessException($"Desteklenmeyen kaynak dil: {request.FromLanguage}");
@@ -42,35 +45,18 @@ public class TranslationBusinessRules : ITranslationBusinessRules
         if (!_supportedLanguages.ContainsKey(request.ToLanguage.ToLower()))
             throw new BusinessException($"Desteklenmeyen hedef dil: {request.ToLanguage}");
 
+        if (string.IsNullOrEmpty(_googleOptions.ApiKey))
+            throw new ConfigurationException("Google Translate API anahtarı yapılandırılmamış.");
+
         await Task.CompletedTask;
     }
 
-    public async Task<string> GetValidApiKeyAsync()
-    {
-        var apiKey = _configuration["GoogleTranslate:ApiKey"];
-
-        if (string.IsNullOrEmpty(apiKey))
-            throw new ConfigurationException("Google Translate API anahtarı yapılandırılmamış.");
-
-        return await Task.FromResult(apiKey);
-    }
-
-    public string GenerateCacheKey(TranslationRequest request)
+    public string GenerateCacheKey(TranslationRequest request, string prefix)
     {
         var input = $"{request.Text}_{request.FromLanguage}_{request.ToLanguage}";
-        using var sha256 = System.Security.Cryptography.SHA256.Create();
+        using var sha256 = SHA256.Create();
         var hash = sha256.ComputeHash(Encoding.UTF8.GetBytes(input));
-        return $"translation_{Convert.ToBase64String(hash)[..16]}";
-    }
-
-    public MemoryCacheEntryOptions GetCacheOptions()
-    {
-        return new MemoryCacheEntryOptions
-        {
-            AbsoluteExpirationRelativeToNow = TimeSpan.FromMinutes(5),
-            SlidingExpiration = TimeSpan.FromMinutes(2),
-            Priority = CacheItemPriority.Normal
-        };
+        return $"{prefix}{Convert.ToBase64String(hash)[..16]}";
     }
 
     public TranslationResponse CreateErrorResponse(string error)
@@ -87,9 +73,7 @@ public class TranslationBusinessRules : ITranslationBusinessRules
     public TranslationResponse ProcessGoogleTranslateResponse(GoogleTranslateResponse? googleResponse, TranslationRequest request)
     {
         if (googleResponse?.data?.translations?.Any() != true)
-        {
             throw new ExternalApiException("Google Translate API'sinden geçersiz yanıt alındı.");
-        }
 
         var translation = googleResponse.data.translations.First();
 
