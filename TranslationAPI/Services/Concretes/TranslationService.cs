@@ -1,5 +1,6 @@
 ﻿using Microsoft.Extensions.Caching.Memory;
 using System.Text.Json;
+using TranslationAPI.BusinessRules.Abstracts;
 using TranslationAPI.Models.External;
 using TranslationAPI.Models.Requests;
 using TranslationAPI.Models.Responses;
@@ -13,150 +14,110 @@ public class TranslationService : ITranslationService
     private readonly IMemoryCache _cache;
     private readonly ILogger<TranslationService> _logger;
     private readonly IConfiguration _configuration;
+    private readonly ITranslationBusinessRules _businessRules;
 
     private const string GOOGLE_TRANSLATE_URL = "https://translation.googleapis.com/language/translate/v2";
 
-    private readonly Dictionary<string, string> _supportedLanguages = new()
-        {
-            { "auto", "Otomatik Algıla" },
-            { "tr", "Türkçe" },
-            { "en", "İngilizce" },
-            { "de", "Almanca" },
-            { "fr", "Fransızca" },
-            { "es", "İspanyolca" },
-            { "it", "İtalyanca" }
-        };
-
-    public TranslationService(HttpClient httpClient, IMemoryCache cache,
-        ILogger<TranslationService> logger, IConfiguration configuration)
+    public TranslationService(
+        HttpClient httpClient,
+        IMemoryCache cache,
+        ILogger<TranslationService> logger,
+        IConfiguration configuration,
+        ITranslationBusinessRules businessRules)
     {
         _httpClient = httpClient;
         _cache = cache;
         _logger = logger;
         _configuration = configuration;
+        _businessRules = businessRules;
         _httpClient.Timeout = TimeSpan.FromSeconds(30);
     }
 
     public async Task<TranslationResponse> TranslateAsync(TranslationRequest request)
     {
-        try
+        await _businessRules.ValidateTranslationRequestAsync(request);
+
+        var cachedResult = await GetFromCacheAsync(request);
+        if (cachedResult != null)
         {
-            if (string.IsNullOrWhiteSpace(request.Text))
-            {
-                return new TranslationResponse
-                {
-                    Success = false,
-                    Error = "Çevrilecek metin boş olamaz.",
-                    Timestamp = DateTime.UtcNow
-                };
-            }
-
-            var cacheKey = $"translation_{request.Text}_{request.FromLanguage}_{request.ToLanguage}";
-
-            if (_cache.TryGetValue(cacheKey, out TranslationResponse? cachedResult))
-            {
-                cachedResult!.FromCache = true;
-                return cachedResult;
-            }
-
-            var apiKey = _configuration["GoogleTranslate:ApiKey"];
-            if (string.IsNullOrEmpty(apiKey))
-            {
-                return new TranslationResponse
-                {
-                    Success = false,
-                    Error = "API anahtarı yapılandırılmamış.",
-                    Timestamp = DateTime.UtcNow
-                };
-            }
-
-            var result = await CallGoogleTranslateAsync(request, apiKey);
-
-            if (result.Success)
-            {
-                var cacheOptions = new MemoryCacheEntryOptions
-                {
-                    AbsoluteExpirationRelativeToNow = TimeSpan.FromMinutes(5)
-                };
-                _cache.Set(cacheKey, result, cacheOptions);
-            }
-
-            return result;
+            _logger.LogInformation("Translation returned from cache for: {Text}", request.Text[..Math.Min(50, request.Text.Length)]);
+            return cachedResult;
         }
-        catch (Exception ex)
+
+        var apiKey = await _businessRules.GetValidApiKeyAsync();
+
+        var result = await CallGoogleTranslateAsync(request, apiKey);
+
+        if (result.Success)
         {
-            _logger.LogError(ex, "Çeviri işlemi hatası");
-            return new TranslationResponse
-            {
-                Success = false,
-                Error = "Çeviri işlemi başarısız.",
-                Timestamp = DateTime.UtcNow
-            };
+            await CacheResultAsync(request, result);
         }
+
+        return result;
+    }
+
+    private async Task<TranslationResponse?> GetFromCacheAsync(TranslationRequest request)
+    {
+        var cacheKey = _businessRules.GenerateCacheKey(request);
+
+        if (_cache.TryGetValue(cacheKey, out TranslationResponse? cachedResult))
+        {
+            cachedResult!.FromCache = true;
+            return cachedResult;
+        }
+
+        return await Task.FromResult<TranslationResponse?>(null);
+    }
+
+    private async Task CacheResultAsync(TranslationRequest request, TranslationResponse result)
+    {
+        var cacheKey = _businessRules.GenerateCacheKey(request);
+        var cacheOptions = _businessRules.GetCacheOptions();
+
+        _cache.Set(cacheKey, result, cacheOptions);
+        _logger.LogInformation("Translation cached with key: {CacheKey}", cacheKey);
+
+        await Task.CompletedTask;
     }
 
     private async Task<TranslationResponse> CallGoogleTranslateAsync(TranslationRequest request, string apiKey)
     {
-        try
+        var requestBody = new
         {
-            var requestBody = new
-            {
-                q = request.Text,
-                source = request.FromLanguage == "auto" ? null : request.FromLanguage,
-                target = request.ToLanguage,
-                format = "text"
-            };
+            q = request.Text,
+            source = request.FromLanguage == "auto" ? null : request.FromLanguage,
+            target = request.ToLanguage,
+            format = "text"
+        };
 
-            var json = JsonSerializer.Serialize(requestBody);
-            var content = new StringContent(json, System.Text.Encoding.UTF8, "application/json");
-            var url = $"{GOOGLE_TRANSLATE_URL}?key={apiKey}";
+        var json = JsonSerializer.Serialize(requestBody);
+        var content = new StringContent(json, System.Text.Encoding.UTF8, "application/json");
+        var url = $"{GOOGLE_TRANSLATE_URL}?key={apiKey}";
 
-            var response = await _httpClient.PostAsync(url, content);
+        _logger.LogInformation("Calling Google Translate API: {FromLang} -> {ToLang}",
+            request.FromLanguage, request.ToLanguage);
 
-            if (response.IsSuccessStatusCode)
-            {
-                var responseJson = await response.Content.ReadAsStringAsync();
-                var googleResponse = JsonSerializer.Deserialize<GoogleTranslateResponse>(responseJson,
-                    new JsonSerializerOptions { PropertyNameCaseInsensitive = true });
+        var response = await _httpClient.PostAsync(url, content);
 
-                if (googleResponse?.data?.translations?.Any() == true)
-                {
-                    var translation = googleResponse.data.translations.First();
-
-                    return new TranslationResponse
-                    {
-                        Success = true,
-                        TranslatedText = translation.translatedText,
-                        OriginalText = request.Text,
-                        FromLanguage = translation.detectedSourceLanguage ?? request.FromLanguage,
-                        ToLanguage = request.ToLanguage,
-                        FromCache = false,
-                        Timestamp = DateTime.UtcNow
-                    };
-                }
-            }
-
-            return new TranslationResponse
-            {
-                Success = false,
-                Error = $"API hatası: {response.StatusCode}",
-                Timestamp = DateTime.UtcNow
-            };
-        }
-        catch (HttpRequestException)
+        if (!response.IsSuccessStatusCode)
         {
-            return new TranslationResponse
-            {
-                Success = false,
-                Error = "Çeviri servisine bağlanılamadı.",
-                Timestamp = DateTime.UtcNow
-            };
+            var errorContent = await response.Content.ReadAsStringAsync();
+            _logger.LogError("Google Translate API error: {StatusCode} - {Error}",
+                response.StatusCode, errorContent);
+
+            return _businessRules.CreateErrorResponse($"API hatası: {response.StatusCode}");
         }
+
+        var responseJson = await response.Content.ReadAsStringAsync();
+        var googleResponse = JsonSerializer.Deserialize<GoogleTranslateResponse>(responseJson,
+            new JsonSerializerOptions { PropertyNameCaseInsensitive = true });
+
+        return _businessRules.ProcessGoogleTranslateResponse(googleResponse, request);
     }
 
     public async Task<List<string>> GetSupportedLanguagesAsync()
     {
-        await Task.CompletedTask;
-        return _supportedLanguages.Select(x => $"{x.Key}: {x.Value}").ToList();
+        var languages = _businessRules.GetSupportedLanguages();
+        return await Task.FromResult(languages);
     }
 }

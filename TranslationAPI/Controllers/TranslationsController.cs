@@ -1,5 +1,7 @@
 ﻿using Microsoft.AspNetCore.Mvc;
+using TranslationAPI.Exceptions;
 using TranslationAPI.Models.Requests;
+using TranslationAPI.Models.Responses;
 using TranslationAPI.Services.Abstracts;
 
 namespace TranslationAPI.Controllers;
@@ -18,20 +20,27 @@ public class TranslationController : ControllerBase
     }
 
     [HttpPost("translate")]
+    [ProducesResponseType(typeof(TranslationResponse), 200)]
+    [ProducesResponseType(typeof(ApiErrorResponse), 400)]
     public async Task<IActionResult> Translate([FromBody] TranslationRequest request)
     {
+        _logger.LogInformation("Translation request received for text: {TextPreview}",
+            request.Text?[..Math.Min(50, request.Text?.Length ?? 0)]);
+
         var result = await _translationService.TranslateAsync(request);
-        return result.Success ? Ok(result) : BadRequest(result);
+        return Ok(result);
     }
 
     [HttpPost("translate/batch")]
+    [ProducesResponseType(typeof(List<TranslationResponse>), 200)]
     public async Task<IActionResult> TranslateBatch([FromBody] List<TranslationRequest> requests)
     {
         if (requests?.Count > 10)
-            return BadRequest("Maksimum 10 metin çevrilebilir.");
+            throw new BusinessException("Maksimum 10 metin aynı anda çevrilebilir.");
 
         var tasks = requests!.Select(req => _translationService.TranslateAsync(req));
         var results = await Task.WhenAll(tasks);
+
         return Ok(results);
     }
 
